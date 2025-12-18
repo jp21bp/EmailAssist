@@ -695,7 +695,7 @@ def readEventsDate(day:str = None):
         # now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
         minDay = datetime.datetime(2025, 12, 28, tzinfo=datetime.timezone.utc).isoformat()
         maxDay = datetime.datetime(2025, 12, 29, tzinfo=datetime.timezone.utc).isoformat()
-        print("Getting the upcoming 10 events")
+        print("Getting event on this day")
         events_result = (
             service.events()
             .list(
@@ -748,8 +748,8 @@ if __name__ == "__main__":
     # createDraft()
     # sendEmail()
     # createEvent()
-    # readEvent()
-    readEventsDate()
+    readEvent()
+    # readEventsDate()
 
 
 

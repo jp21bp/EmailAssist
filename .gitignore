@@ -12,3 +12,4 @@ wheels/
 # Otros archivos
 token.json
 credentials.json
+*.txt

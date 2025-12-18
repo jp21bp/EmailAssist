@@ -12,6 +12,7 @@
 import os, operator
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from typing import Optional, Literal
 from typing_extensions import TypedDict, Literal, Annotated
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool   #Decorator
@@ -19,10 +20,9 @@ from langchain.agents import create_agent
 from prompts import *
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
-from typing import Literal
 from IPython.display import Image
 from PIL import Image as PImage
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
     #class datetime.datetime(year, month, day, hour=0, minute=0, 
     # second=0, microsecond=0, tzinfo=None, *, fold=0)
 
@@ -144,16 +144,15 @@ from googleapiclient.errors import HttpError
 from email.message import EmailMessage
 import base64
 
-# If modifying these scopes, delete the file token.json.
+##### Creating email tool functions
+#### Scope of gmail api
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar.events.owned",
 ]
-#### Creating the tools
-# @tool
-def write_email(to: str, subject: str, content: str) -> str:
-    """Write and send an email."""
+#### Gathering credentials
+def gather_credentials():
     creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
@@ -172,8 +171,18 @@ def write_email(to: str, subject: str, content: str) -> str:
         # Save the credentials for the next run
         with open("token.json", "w") as token:
             token.write(creds.to_json())
+    return creds
 
-
+    
+#### Writing emails
+@tool
+def write_email(
+    to: str,
+    subject: str,
+    content: str,
+) -> str:
+    """Write an email to a subject"""
+    creds = gather_credentials()
     try:
         service = build("gmail", "v1", credentials=creds)
         message = EmailMessage()
@@ -200,101 +209,333 @@ def write_email(to: str, subject: str, content: str) -> str:
         print(f"An error occurred: {error}")
     return f"Email sent to {to} with subject '{subject}'"
 
-# @tool
-def schedule_meeting(
+
+#### Schedule meetings
+@tool
+def schedule_event(
     attendees: dict[str, str], 
     subject: str, 
     duration_minutes: int, 
-        # For now assume <60 mins
     preferred_day: str
 ) -> str:
-    """Schedule a calendar meeting."""
-    creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-    
-    service = build("calendar", "v3", credentials=creds)
+    """ Schedule an event on Google calendar"""
+    creds = gather_credentials()
+    try: 
+        service = build("calendar", "v3", credentials=creds)
 
-    ### Configure dates
-    date = preferred_day.split("/")
-    date = [int(item) for item in date]
-        # Assuming mm/dd/yyyy
-    start = datetime(date[2], date[0], date[1], 8, 0, tzinfo=timezone.utc).isoformat()
-    end = datetime(date[2], date[0], date[1], 8, int(duration_minutes), tzinfo=timezone.utc).isoformat()
+        ### Configure dates
+        date = preferred_day.split("/")
+        date = [int(item) for item in date]
+            # Assuming mm/dd/yyyy
+        start = datetime(date[2], date[0], date[1], 8, 0, tzinfo=timezone.utc).isoformat()
+        end = datetime(date[2], date[0], date[1], 8, int(duration_minutes), tzinfo=timezone.utc).isoformat()
 
 
 
-    ### Create the events
-    event = {
-        'summary': subject,
-        # 'location': '800 Howard St., San Francisco, CA 94103',
-        # 'description': 'A chance to hear more about Google\'s developer products.',
-        'start': {
-            'dateTime': start,
-            'timeZone': 'America/New_York',
-        },
-        'end': {
-            'dateTime': end,
-            'timeZone': 'America/New_York',
-        },
-        # 'recurrence': [
-        #     'RRULE:FREQ=DAILY;COUNT=2'
-        # ],
-        'attendees': [attendees],
-        # 'reminders': {
-        #     'useDefault': False,
-        #     'overrides': [
-        #         {'method': 'email', 'minutes': 24 * 60},
-        #         {'method': 'popup', 'minutes': 10},
-        #     ],
-        # },
-    }
+        ### Create the events
+        event = {
+            'summary': subject,
+            # 'location': '800 Howard St., San Francisco, CA 94103',
+            # 'description': 'A chance to hear more about Google\'s developer products.',
+            'start': {
+                'dateTime': start,
+                'timeZone': 'America/New_York',
+            },
+            'end': {
+                'dateTime': end,
+                'timeZone': 'America/New_York',
+            },
+            # 'recurrence': [
+            #     'RRULE:FREQ=DAILY;COUNT=2'
+            # ],
+            'attendees': [attendees],
+            # 'reminders': {
+            #     'useDefault': False,
+            #     'overrides': [
+            #         {'method': 'email', 'minutes': 24 * 60},
+            #         {'method': 'popup', 'minutes': 10},
+            #     ],
+            # },
+        }
 
-    event = service.events().insert(calendarId='primary', body=event).execute()
-    print(f"Event created: {event.get('htmlLink')}")
+        event = service.events().insert(calendarId='primary', body=event).execute()
+        print(f"Event created: {event.get('htmlLink')}")
+    except HttpError as error:
+        print(f"An error occured: {error}")
     return f"Meeting '{subject}' scheduled for {preferred_day} with {len(attendees)} attendees"
 
+
+        
+
+
+def check_day_availability(
+    start: datetime, 
+    end: datetime,  
+    event_duration: int = 30,
+) -> str:
+    # TO FIX: Current, the times showing are the times at which the meeting could start
+        # However, this can cause confusion when the user is seeing the times
+        # They can mistake 11:45 - 11:50 as if the meeting can only last 5 mins
+            # However, this actually means that the meeting can start at ANYTIME during 
+                    # range, and still not conflict with other planned events
+        # The fix will need to be able to display non confusing timings
+    # Pydantic model can be done with field validator, see C17V
+    print(f"{start} - {end}")
+    creds = gather_credentials()
+    try:
+        service = build("calendar", "v3", credentials=creds)
+        events_result = (
+            service.events()
+            .list(
+                calendarId="primary",
+                timeMin=start.isoformat(),
+                timeMax=end.isoformat(),
+                # maxResults=10,
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
+        events = events_result.get("items", [])
+
+        # day_datetime = datetime.fromisoformat(start)
+        # day = day_datetime.strftime("%b %d")
+
+
+        day = start.strftime("%b %d")
+
+        if not events:
+            print(f"Available on {day} from 700 to 1700")
+            return f"Available on {day} from 700 to 1700"
+        
+        duration_delta = timedelta(minutes  = event_duration)
+        entry_time = 700
+        exit_time = 1700
+        add_entry, add_exit = True, True 
+        available_times = {
+            "start":[],
+            "end": [],
+        }
+
+        for i, event in enumerate(events):
+            print(f"Working with event {i}:") 
+
+            ### Getting the start and end times of the planned event
+            planned_event_start = event["start"].get("dateTime", event["start"].get("date"))
+            planned_event_end = event["end"].get("dateTime", event["end"].get("date"))
+            
+            print(f"Event {i} start: {planned_event_start}")
+            print(f"Event {i} end: {planned_event_end}")
+            
+            ### Transforming times into datetime iso format
+            start_datetime = datetime.fromisoformat(planned_event_start)
+            end_datetime = datetime.fromisoformat(planned_event_end)
+
+            ### Adding the event duration to the already planned events
+                # This yields the latest available to start the new event
+                # Note: latest avaialbility for new event 
+                        # = start time of planned event - new event's duration
+            latest_availability = start_datetime - duration_delta
+            latest_availability = int(
+                f"{latest_availability.hour}{latest_availability.minute:0>2d}"
+            )
+
+            ### Creating str time for latest_availability
+                # I.e., this is what will be displayed in the outcome of avaialble times
+                # It will erase confusion as to when meetings should be arranged
+                # Ex: 45 minute meeting => available time 1145 - 1150
+                    # Avaialble gap is 5 minutes, but event can begin at ANY TIME
+                            # DURING those 5 mins that won't overlap into other planned events
+            latest_to_display = int(
+                f"{start_datetime.hour}{start_datetime.minute:0>2d}"
+            )
+
+            ### Calculating the earliest availability to start new event
+                # NOte: earliest availability = end of the planned event
+            earliest_avaialability = int(
+                f"{end_datetime.hour}{end_datetime.minute:0>2d}"
+            )
+            
+            ### Edge cases
+            if latest_availability < entry_time and earliest_avaialability > exit_time:
+                # This would be an event that takes up the whole day
+                # Ex: 600 - 1800
+                print(f'CASE A - {latest_availability} and {earliest_avaialability}')
+                break
+            elif latest_availability > exit_time or earliest_avaialability < entry_time:
+                # IF the end of a meeting happens BEFORE 7AM, then 
+                        # it wouldn't matter registering the start of 
+                        # that meeting, since it would ALSO be before
+                        # 7 AM
+                    # The same can be said if beginning of event is 
+                            # AFTER 1700, end of day
+                # Ex: meeting 5am - 630am
+                    # End @ 630 am => continue to next event
+                # Ex: 1800 - 1900
+                    # Start @ 1800 > 1700 = > continue to next eventx
+                print(f'CASE B - {latest_availability} and {earliest_avaialability}')
+                continue
+            elif latest_availability < entry_time and earliest_avaialability > entry_time:
+                # This is the case for when the event starts before entry time
+                        # but it ends after the entry time
+                # EX: 600 - 800
+                # In this case, we won't add 700 to available start times
+                    # Since the earliest start time starts at 800
+                print(f'CASE C - {latest_availability} and {earliest_avaialability}')
+                add_entry = False
+                available_times["start"].append(earliest_avaialability)
+            elif latest_availability < exit_time and earliest_avaialability > exit_time:
+                # This is when an event starts before exit time but ends afterwards
+                # EX: 1600 - 1800
+                # In this case we won't add 1700 to available end times
+                    # Since the latest time for availbility if 1600 - meeting_duration
+                print(f'CASE D - {latest_availability} and {earliest_avaialability}')
+                add_exit = False
+                available_times["end"].append(latest_availability)
+            else:
+                available_times["start"].append(earliest_avaialability)
+                available_times["end"].append(latest_availability)
+
+        
+        ### Adding the beggining of the day and end of the day
+        if add_entry: available_times['start'].insert(0, entry_time)
+        if add_exit: available_times['end'].append(exit_time)
+           
+        ### Base check
+        # for i, event in enumerate(events):
+        #     start = event["start"].get("dateTime", event["start"].get("date"))
+        #     end = event["end"].get("dateTime", event["end"].get("date"))
+        #     print(f"Event {i} start: {start}")
+        #     print(f"Event {i} end: {end}")
+
+    except HttpError as error:
+        print(f"Error occured: {error}")
+
+    result = f"Available times on {day} are:\n"
+    event_duration_percentage = (event_duration / 60) * 100
+    for start, end in zip(available_times['start'], available_times['end']):
+        if start + event_duration_percentage > exit_time : break
+        if start >= end: 
+            print('CONTINUING')
+            continue
+        result += f"{start} to {end}\n"
+
+    print(result)
+    return result
+
+
+#### General availability checker tool
 @tool
-def check_calendar_availability(day: str) -> str:
-    #TODO: create a pydantic model that will have correct day formattings
-        # Ex
-    # class CheckDates(BaseModel):
-    #     start_year: int
-    #     start_month: int
-    #     start_date: int
-    #     end_year: Optional[int]
-    #     end_month: Optional[int]
-    #     end_date: Optional[int]
-        # That way it'll be easier to put into check calendar on any day
-    """Check calendar availability for a given day."""
-    # Placeholder response - in real app would check actual calendar
-    return f"Available times on {day}: 9:00 AM, 2:00 PM, 4:00 PM"
+def check_availability(
+    start: str, # Will be in iso format
+    end: str,   # Will be in iso format
+    event_duration: int = None,
+) -> str:
+    """Check avaialable timings by referencing a Google calendar"""
+    start = datetime.fromisoformat(start)
+    end = datetime.fromisoformat(end)
+    day_diff = end - start
+    day_diff = day_diff.days
+    # print(day_diff)
+    day_delta = timedelta(days = 1)
+    # print(day_delta)
+    tmp_start = start
+    tmp_end = start + day_delta
+    for i in range(day_diff):
+        check_day_availability(tmp_start, tmp_end, event_duration)
+        # print(f"{tmp_start} - {tmp_end}")
+        tmp_start = tmp_end
+        tmp_end = tmp_end + day_delta
+    return
+
+
 
 
 #### Checking that the tools work as intended
+### First tool
 # print(write_email('jparra2357@gmail.com', 'integracion', 'probando la integracion de api'))
-print(schedule_meeting(
-    {'email': 'jparra2357@gmail.com'},
-    "Nuevo evento",
-    "30",
-    "12/23/2025",
-        # Note: bs ubuntu thinks i'm in a diff timezone, timing might be off
-))
+    # works
+### Second tool
+# print(schedule_meeting(
+#     {'email': 'jparra2357@gmail.com'},
+#     "Nuevo evento",
+#     "30",
+#     "12/23/2025",
+#         # Note: bs ubuntu thinks i'm in a diff timezone, timing might be off
+# ))
+    # works
+### Third tool
+# check_availability(
+#     '2025-12-21T00:00:00-05:00',
+#     '2025-12-24T00:00:00-05:00',
+#     30
+# )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###  Turn ambigous prompt for the main single-agent into specific prompt
+## Importing ambiguous prompt for main agent
+def create_prompt(state):
+    return [
+        {
+            "role": "system", 
+            "content": agent_system_prompt.format(
+                instructions=prompt_instructions["agent_instructions"],
+                **profile
+                )
+        }
+    ] + state['messages']
+
+
+
+## Assembling main state-agent
+tools=[write_email, schedule_event, check_availability]
+agent = create_agent(
+    model=llm,
+    tools=tools,
+    # prompt=create_prompt,
+)
+
+print(dir(agent))
+
+
+
+
+
+
+
+
+
+
+
 
 
 
