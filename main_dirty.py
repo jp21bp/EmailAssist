@@ -12,9 +12,9 @@
 import os, operator
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from typing_extensions import TypedDict, Literal, Annotated
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool   #Decorator
 from langchain.agents import create_agent
@@ -730,7 +730,7 @@ responder_agent = create_agent(
 #### Creating the agent's state
 class AgentState(TypedDict):
     email_input: dict
-    messages: Annotated[list, operator.add]
+    messages: Annotated[List[AnyMessage], operator.add]
 
 #### Creating nodes
 ### Router node
@@ -769,10 +769,7 @@ def router_node(state: AgentState) -> Command[
         goto = "responder"
         update = {
             "messages": [
-                {
-                    "role": "user",
-                    "content": f"Respond to the email {state['email_input']}",
-                }
+                HumanMessage(content=f"Respond to the email {state['email_input']}"),
             ]
         }
     elif result.classification == "ignore":
@@ -790,7 +787,18 @@ def router_node(state: AgentState) -> Command[
 
 ### Responder node
 def responder_node(state: AgentState):
-    return
+    ## Extract user prompt from agent state
+    user_prompt = state['messages'][-1]
+    print(f'Stored user prompt:\n{user_prompt}\n')
+    ## Invoke agent with user prompt
+    response = responder_agent.invoke(
+        {"messages": [user_prompt]}
+    )
+        # This will be an AIMessage data type
+    ## Update the agent state with messages
+    print(f"Response: {response}")
+
+    return {"messages": [response]}
 
 
 #### Assembling the email assistant graph
@@ -802,7 +810,7 @@ def responder_node(state: AgentState):
 
 email_agent = StateGraph(AgentState)
 email_agent = email_agent.add_node("router", router_node)
-email_agent = email_agent.add_node("responder", responder_agent)
+email_agent = email_agent.add_node("responder", responder_node)
 email_agent = email_agent.add_edge(START, "router")
 email_agent = email_agent.compile(
     checkpointer=memory,
@@ -815,17 +823,21 @@ print(email_agent.get_graph().draw_ascii())
 
 
 
-# email = getEmails()
-# config = {
-#     'configurable':{
-#         'thread_id': str(1),
-#     }
-# }
-# response = email_agent.invoke({'email_input': email}, config)
-# for m in response['messages']:
-#     m.pretty_print()
+email = getEmails()
+# print(email)
+config = {
+    'configurable':{
+        'thread_id': str(1),
+    }
+}
+response = email_agent.invoke({'email_input': email}, config)
 
-# storage.save_data(response, 1, "test_response_1")
+storage.save_data(response, 1, "test_response_1")
+
+
+for i,m in enumerate(response['messages']):
+    print(f"Message {i}: {m}\n")
+
 
 
 
