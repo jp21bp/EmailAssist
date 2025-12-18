@@ -14,20 +14,48 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from typing_extensions import TypedDict, Literal, Annotated
+from langchain_core.messages import SystemMessage
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool   #Decorator
 from langchain.agents import create_agent
+    # https://reference.langchain.com/python/langchain/agents/#langchain.agents.create_agent
 from prompts import *
+from utilities_clean import *
+from bs4 import BeautifulSoup
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
 from IPython.display import Image
 from PIL import Image as PImage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from datetime import datetime, timezone, timedelta
     #class datetime.datetime(year, month, day, hour=0, minute=0, 
     # second=0, microsecond=0, tzinfo=None, *, fold=0)
 
+### Getting APIs
+load_dotenv()
+google_api_key = os.getenv("GOOGLE_API_KEY")
+
+
 #### Setting up models
-llm = init_chat_model()
+llm = ChatGoogleGenerativeAI(
+    api_key = google_api_key,
+    model = "gemini-2.5-flash-lite",
+)
+
+#### Setting up DB storage utility
+DB_NAME = "output.sqlite"
+TABLE_NAME = "email_assistant"
+storage = Storage(DB_NAME, TABLE_NAME)
+
+#### Creating memories
+### Short-term memory
+conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
+    #"check_same_thread = False" => enables multi-thread usage
+memory = SqliteSaver(conn)
+
+
+
 
 
 #### Setup profile, GENERAL prompt, and example email
@@ -117,6 +145,38 @@ user_prompt = triage_user_prompt.format(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ##### Create tools
 #### GMail API overview: 
     # https://developers.google.com/workspace/gmail/api/guides
@@ -151,6 +211,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar.events.owned",
 ]
+
 #### Gathering credentials
 def gather_credentials():
     creds = None
@@ -172,6 +233,108 @@ def gather_credentials():
         with open("token.json", "w") as token:
             token.write(creds.to_json())
     return creds
+
+
+#### Getting emails
+def getEmails():
+    creds = gather_credentials()
+    try: 
+        service = build('gmail', 'v1', credentials=creds)
+        results = (
+            service.users().messages().list(maxResults = 15, userId="me", labelIds=["INBOX"]).execute()
+                #Note: technically "INBOX" shows "ALL MAIL" mail
+                    # I.e., it isnt exclusive only to mails that are in inbox
+                    # for some reason it shows all mail
+                    # need to investigate if there's a way fpor me to only gilter the invox mail
+                    # at the same time, there is no prioblem in filtering through all mail
+                    # It will simply take a bit longer to process
+
+        )
+        messages = results.get("messages", [])
+
+        if not messages:
+            print("No messages found.")
+            return
+        
+        for i, msg in enumerate(messages):
+            if i != 0: continue
+
+            txt = (
+                service.users().messages().get(userId="me", id=msg["id"]).execute()
+            )
+
+            ### Creating webpage simulation of email
+            # try:
+            #     encoded_data = txt['payload']['body']['data']
+            #     # print(f'FIRST ENCODED DATA: {encoded_data}')
+            # except: pass
+
+            # try:
+            #     encoded_data = txt['payload']['parts'][1]['body']['data']
+            #     # print(f'SECOND ENCODED DATA: {encoded_data}')
+            # except: pass
+
+            # try:
+            #     encoded_data = txt['payload']['parts'][0]['parts'][0]['body']['data']
+            #     # print(f'THIRD ENCODED DATA: {encoded_data}')
+            # except: pass
+
+            # encoded_data = encoded_data.replace("-","+").replace("_","/")
+            #     #Necessary to decode the email properly
+            # decoded_data = base64.b64decode(encoded_data)
+            # # print(decoded_data)
+            # soup = BeautifulSoup(decoded_data , "html.parser")
+            # # body = soup.body()
+            # # main = soup.find('main')
+            # # print(main)
+
+            # with open('output.html', 'w') as file:
+            #     file.write(str(soup))
+            #         #SHOWS NICE HTML WEBPAGE
+
+
+
+            ### Extracting: author, subject, to, email_thread
+            result = {}
+            payload = txt['payload']
+            headers = payload['headers']
+            body = payload['body']
+            parts = payload['parts']
+            # print(txt.keys())
+            # print('='*30)
+            # print(payload.keys())
+            # print('='*30)
+            # print(headers)
+            # print('='*30)
+            # print(body)
+            # print('='*30)
+            # print(parts[0])
+            # print('='*30)
+            # print(parts[1])
+            # print('='*30)
+            for data in headers:
+                if data['name'] == 'Subject':
+                    result["subject"] = data['value']
+                if data['name'] == "From":
+                    result["author"] = data['value']
+                if data['name'] == 'To':
+                    result["to"] = data['value']
+
+            encoded_body = parts[0]['body']['data']
+            encoded_body = encoded_body.replace("-","+").replace("_","/")
+                #Necessary to decode the email properly
+            decoded_data = base64.b64decode(encoded_body)
+            decoded_data = decoded_data.decode('utf-8')
+            result['email_thread'] = decoded_data
+            break
+
+
+    except HttpError as error:
+        print(f"Error: {error}")
+
+    return result
+
+
 
     
 #### Writing emails
@@ -503,28 +666,177 @@ def check_availability(
 
 ###  Turn ambigous prompt for the main single-agent into specific prompt
 ## Importing ambiguous prompt for main agent
-def create_prompt(state):
-    return [
-        {
-            "role": "system", 
-            "content": agent_system_prompt.format(
-                instructions=prompt_instructions["agent_instructions"],
-                **profile
-                )
-        }
-    ] + state['messages']
+def react_sys_prompt():
+    content = agent_system_prompt.format(
+        instructions=prompt_instructions["agent_instructions"],
+        **profile
+    )
+    return SystemMessage(content=content)
 
 
 
-## Assembling main state-agent
+
+### Assembling main state-agent
 tools=[write_email, schedule_event, check_availability]
-agent = create_agent(
+responder_agent = create_agent(
     model=llm,
     tools=tools,
-    # prompt=create_prompt,
+    system_prompt=react_sys_prompt(),
 )
 
-print(dir(agent))
+# print(dir(agent))
+
+
+### invoking the main state agent
+# response = agent.invoke(
+#     {"messages": [{
+#         "role": "user", 
+#         "content": "what is my availability for tuesday?"
+#     }]}
+# )
+# response["messages"][-1].pretty_print()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##### Creating email assistant MAS
+#### Creating the agent's state
+class AgentState(TypedDict):
+    email_input: dict
+    messages: Annotated[list, operator.add]
+
+#### Creating nodes
+### Router node
+def router_node(state: AgentState) -> Command[
+    Literal["responder", "__end__"]
+]:
+    author = state['email_input']['author']
+    to = state['email_input']['to']
+    subject = state['email_input']['subject']
+    email_thread = state['email_input']['email_thread']
+
+    system_prompt = triage_system_prompt.format(
+        full_name=profile["full_name"],
+        name=profile["name"],
+        user_profile_background=profile["user_profile_background"],
+        triage_no=prompt_instructions["triage_rules"]["ignore"],
+        triage_notify=prompt_instructions["triage_rules"]["notify"],
+        triage_email=prompt_instructions["triage_rules"]["respond"],
+        examples=None
+    )
+    user_prompt = triage_user_prompt.format(
+        author=author, 
+        to=to, 
+        subject=subject, 
+        email_thread=email_thread
+    )
+    result = llm_router.invoke(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+    result = result['parsed']
+    if result.classification == "respond":
+        print("📧 Classification: RESPOND - This email requires a response")
+        goto = "responder"
+        update = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Respond to the email {state['email_input']}",
+                }
+            ]
+        }
+    elif result.classification == "ignore":
+        print("🚫 Classification: IGNORE - This email can be safely ignored")
+        update = None
+        goto = END
+    elif result.classification == "notify":
+        # If real life, this would do something else
+        print("🔔 Classification: NOTIFY - This email contains important information")
+        update = None
+        goto = END
+    else:
+        raise ValueError(f"Invalid classification: {result.classification}")
+    return Command(goto=goto, update=update)
+
+### Responder node
+def responder_node(state: AgentState):
+    return
+
+
+#### Assembling the email assistant graph
+    # Not going to use python "class"
+        # Main benefit - modularity
+            # I can create the node's fcnality in other files
+            # Can import those node fcnalities into this file
+            # Use imports directly, w.o./ having to put inside "class"
+
+email_agent = StateGraph(AgentState)
+email_agent = email_agent.add_node("router", router_node)
+email_agent = email_agent.add_node("responder", responder_agent)
+email_agent = email_agent.add_edge(START, "router")
+email_agent = email_agent.compile(
+    checkpointer=memory,
+)
+
+
+#### Visualizing the email assistnat graph
+# print(dir(email_agent))
+print(email_agent.get_graph().draw_ascii())
+
+
+
+# email = getEmails()
+# config = {
+#     'configurable':{
+#         'thread_id': str(1),
+#     }
+# }
+# response = email_agent.invoke({'email_input': email}, config)
+# for m in response['messages']:
+#     m.pretty_print()
+
+# storage.save_data(response, 1, "test_response_1")
+
+
+
+
+
+
+
+
+
+
+
 
 
 

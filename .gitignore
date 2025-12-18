@@ -13,3 +13,6 @@ wheels/
 token.json
 credentials.json
 *.txt
+.env
+*.sqlite*
+*.html
