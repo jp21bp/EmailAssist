@@ -9,7 +9,9 @@
 
 ##### General setup
 #### Import libraries
-import os, operator
+import os, operator, json
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    # Used to manually decode checkpoints in sqlite  DB
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List
@@ -53,6 +55,9 @@ storage = Storage(DB_NAME, TABLE_NAME)
 conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
     #"check_same_thread = False" => enables multi-thread usage
 memory = SqliteSaver(conn)
+cursor = conn.cursor()
+# print(dir(memory))
+# print(dir(memory.serde))
 
 
 
@@ -257,7 +262,7 @@ def getEmails():
             return
         
         for i, msg in enumerate(messages):
-            if i != 0: continue
+            if i != 5: continue
 
             txt = (
                 service.users().messages().get(userId="me", id=msg["id"]).execute()
@@ -685,7 +690,7 @@ responder_agent = create_agent(
 )
 
 # print(dir(agent))
-
+# print(responder_agent.get_graph().draw_ascii())
 
 ### invoking the main state agent
 # response = agent.invoke(
@@ -819,27 +824,62 @@ email_agent = email_agent.compile(
 
 #### Visualizing the email assistnat graph
 # print(dir(email_agent))
-print(email_agent.get_graph().draw_ascii())
+# print(email_agent.get_graph().draw_ascii())
 
 
 
-email = getEmails()
+# email = getEmails()
 # print(email)
 config = {
     'configurable':{
         'thread_id': str(1),
     }
 }
-response = email_agent.invoke({'email_input': email}, config)
+# response = email_agent.invoke({'email_input': email}, config)
 
-storage.save_data(response, 1, "test_response_1")
+# storage.save_data(response, 1, "test_response_1")
+
+# response = storage.retrieve_data(1)
+
+# for i,m in enumerate(response['messages']):
+#     print(f"Message {i}: {m}\n")
 
 
-for i,m in enumerate(response['messages']):
-    print(f"Message {i}: {m}\n")
+#### Perform analysis
+### Analyze snapshot history
+## Create analyzer
+analyzer = Analyzer()
+## Gather snapshot history
+display_fields = {
+    # "config",
+    # "parent_config",
+    # "next",
+    "values"
+}
+
+config = {
+    'configurable':{
+        'thread_id': str(1),
+        'checkpoint_ns': "",
+    }
+}
+# print(email_agent.get_state(config))
+main_history = email_agent.get_state_history(config)
+hist_list = list(main_history)
+print('MAIN HISTORY\n\n')
+analyzer.analyze_history(hist_list, display_fields)
 
 
-
+config = {
+    'configurable':{
+        'thread_id': str(1),
+        'checkpoint_ns': "responder:031a0c4f-e821-0b05-537c-93279c2a558d"
+    }
+}
+react_history = email_agent.get_state_history(config)
+hist_list = list(react_history)
+print("\n\n\n\nREPSONDER HISTORY\n\n\n\n")
+analyzer.analyze_history(hist_list, display_fields)
 
 
 

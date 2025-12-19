@@ -274,7 +274,8 @@ class Analyzer():
         
         for field in dir(variable):
             if field.startswith("_"): continue
-            if field not in display_fields: continue
+            if display_fields:
+                if field not in display_fields: continue
             if field == 'values':
                 print(field + '\n' * 2)
                 field_dict = variable.__getattribute__(field)
@@ -296,13 +297,18 @@ class Analyzer():
         display_fields: set,
         separator: str = '\t', 
         indentation: int = 1,
-        finish: bool = True,
     ):
         # I am only going to take into consideration the following attrs:
             #"config", "paretn_config", and "values['messages']"
         for i, snapshot in enumerate(variable):
-            print(f"Snapshot {i}")
-            self.analyze_snapshot(snapshot, display_fields)
+            print(f"SnapshotCheck {i}")
+            self.analyze_snapshot(
+                snapshot, 
+                display_fields, 
+                separator,
+                indentation,
+                finish=False
+            )
             print('\n' + '=' * 30 + '\n')
         return
 
