@@ -85,6 +85,9 @@ store = InMemoryStore(
     index={"embed": embedding_model, "dims": 256}
 )
     # Will need to switch to PostgresStore eventually
+    # Note this store can be used in ANY PART of the email assist graph
+        # Including by the sub-graphs/nodes/agents of the graph
+
 ## Exploring long-term mem.
 # store.list_namespaces()
 # store.search(('email_assistant', 'lance', 'collection'))
@@ -133,6 +136,193 @@ Alice""",
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##### Setting up few-shot memory for router
+#### Creating sample emails to use in few-shot exs
+email1 = { # SAme as "email" above
+    "author": "Alice Smith <alice.smith@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Quick question about API documentation",
+    "email_thread": """Hi John,
+
+    I was reviewing the API documentation for the new authentication service and noticed a few endpoints seem to be missing from the specs. Could you help clarify if this was intentional or if we should update the docs?
+
+    Specifically, I'm looking at:
+    - /auth/refresh
+    - /auth/validate
+
+    Thanks!
+    Alice"""
+}
+
+email2 = {
+    "author": "Sarah Chen <sarah.chen@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Update: Backend API Changes Deployed to Staging",
+    "email_thread": """Hi John,
+
+    Just wanted to let you know that I've deployed the new authentication endpoints we discussed to the staging environment. Key changes include:
+
+    - Implemented JWT refresh token rotation
+    - Added rate limiting for login attempts
+    - Updated API documentation with new endpoints
+
+    All tests are passing and the changes are ready for review. You can test it out at staging-api.company.com/auth/*
+
+    No immediate action needed from your side - just keeping you in the loop since this affects the systems you're working on.
+
+    Best regards,
+    Sarah
+    """
+}
+
+#### COuple the sample emails with a label
+data1 = {
+    "email": email1,
+    "label": "respond"
+}
+
+data2 = {
+    "email": email2,
+    "label": "ignore"
+}
+
+#### Storing these couple few-shot exams into long-term storage
+import uuid
+
+store.put(
+    ("email_assistant", "lance", "examples"), 
+    str(uuid.uuid4()), 
+    data1
+)
+
+store.put(
+    ("email_assistant", "lance", "examples"), 
+    str(uuid.uuid4()), 
+    data2
+)
+
+
+#### Creating formating helper fcn
+    # Will help format the few-shot exs and put into syst. prompt
+# Template for formating an example to put in prompt 
+    # TEmplate is HIGHLY related to data model
+    # Recall: data model is used to feed few-shots to the agent in
+            # a consistent, structured manner
+template = """Email Subject: {subject}
+Email From: {from_email}
+Email To: {to_email}
+Email Content: 
+```
+{content}
+```
+> Triage Result: {result}"""
+
+# Format list of few shots
+def format_few_shot_examples(examples):
+    strs = ["Here are some previous examples:"]
+    for eg in examples:
+        strs.append(
+            template.format(
+                subject=eg.value["email"]["subject"],
+                to_email=eg.value["email"]["to"],
+                from_email=eg.value["email"]["author"],
+                content=eg.value["email"]["email_thread"][:400],
+                result=eg.value["label"],
+            )
+        )
+    return "\n\n------------\n\n".join(strs)
+
+
+
+#### Simulating a retrieval of a few-shot and prompt-formatting it
+email3 = {
+    "author": "Sarah Chen <sarah.chen@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Update: Backend API Changes Deployed to Staging",
+    "email_thread": """Hi John,
+    
+    Wanted to let you know that I've deployed the new authentication endpoints we discussed to the staging environment. Key changes include:
+    
+    - Implemented JWT refresh token rotation
+    - Added rate limiting for login attempts
+    - Updated API documentation with new endpoints
+    
+    All tests are passing and the changes are ready for review. You can test it out at staging-api.company.com/auth/*
+    
+    No immediate action needed from your side - just keeping you in the loop since this affects the systems you're working on.
+    
+    Best regards,
+    Sarah
+    """,
+}
+    #Similar, BUT DIFF., than "email2"
+        # The "Just" is missing in this email
+
+### Simulating retrieval of few-shot example
+# results = store.search(
+#     ("email_assistant", "lance", "examples"),
+#     query=str({"email": email3}),
+#     limit=1)
+
+# print(format_few_shot_examples(results))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ##### Creating Router - simple agent
 #### Creating pydantic models
 class Router(BaseModel):
@@ -153,21 +343,23 @@ class Router(BaseModel):
 llm_router = llm.with_structured_output(Router, include_raw = True)
 
 #### Creating prompts for router
-system_prompt = triage_system_prompt.format(
-    full_name=profile["full_name"],
-    name=profile["name"],
-    examples=None,
-    user_profile_background=profile["user_profile_background"],
-    triage_no=prompt_instructions["triage_rules"]["ignore"],
-    triage_notify=prompt_instructions["triage_rules"]["notify"],
-    triage_email=prompt_instructions["triage_rules"]["respond"],
-)
-user_prompt = triage_user_prompt.format(
-    author=email["from"],
-    to=email["to"],
-    subject=email["subject"],
-    email_thread=email["body"],
-)
+    # This part commented out bc it's not needed
+    # It'll be integrated in the node's fcanlity
+# system_prompt = triage_system_prompt.format(
+#     full_name=profile["full_name"],
+#     name=profile["name"],
+#     examples=None,
+#     user_profile_background=profile["user_profile_background"],
+#     triage_no=prompt_instructions["triage_rules"]["ignore"],
+#     triage_notify=prompt_instructions["triage_rules"]["notify"],
+#     triage_email=prompt_instructions["triage_rules"]["respond"],
+# )
+# user_prompt = triage_user_prompt.format(
+#     author=email["from"],
+#     to=email["to"],
+#     subject=email["subject"],
+#     email_thread=email["body"],
+# )
 
 #### Running router simple-agent on our sample email
 # result = llm_router.invoke(
@@ -213,7 +405,7 @@ user_prompt = triage_user_prompt.format(
 
 
 
-##### Create tools
+##### Create tools for responder agent
 #### GMail API overview: 
     # https://developers.google.com/workspace/gmail/api/guides
         # Overview guide
@@ -765,6 +957,22 @@ def router_node(state: AgentState) -> Command[
     subject = state['email_input']['subject']
     email_thread = state['email_input']['email_thread']
 
+    ## Setting up the namespace to get correct long-term storage
+    namespace = (
+        "email_assistant",
+        config['configurable']['langgraph_user_id'],
+        "examples"
+    )
+
+    ## Extracting the emails that most closely match incoing email
+    examples = store.search(
+        namespace, 
+        query=str({"email": state['email_input']})
+    ) 
+
+    ## Turning extracted emails into fewshot examples
+    examples=format_few_shot_examples(examples)
+
     ## Setting up router's system prompt
     system_prompt = triage_system_prompt.format(
         full_name=profile["full_name"],
@@ -857,6 +1065,7 @@ email_agent = email_agent.add_node("responder", responder_node)
 email_agent = email_agent.add_edge(START, "router")
 email_agent = email_agent.compile(
     checkpointer=memory,
+    store = store
 )
 
 

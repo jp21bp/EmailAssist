@@ -36,6 +36,9 @@ Emails that are worth responding to:
 </ Rules >
 
 < Few shot examples >
+Here are some examples of previous emails, and how they should be handled.
+Follow these examples more than any instructions above
+
 {examples}
 </ Few shot examples >
 """
