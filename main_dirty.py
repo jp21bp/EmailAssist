@@ -9,30 +9,46 @@
 
 ##### General setup
 #### Import libraries
-import os, operator, json
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-    # Used to manually decode checkpoints in sqlite  DB
+import os, operator
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from typing import Optional, Literal, List
-from typing_extensions import TypedDict, Literal, Annotated
-from langchain_core.messages import SystemMessage, HumanMessage, AnyMessage
-from langchain.chat_models import init_chat_model
-from langchain_core.tools import tool   #Decorator
-from langchain.agents import create_agent
-    # https://reference.langchain.com/python/langchain/agents/#langchain.agents.create_agent
-from prompts import *
 from utilities_clean import *
-from bs4 import BeautifulSoup
-from langgraph.checkpoint.sqlite import SqliteSaver
+### Langgraph libraries
+from langchain.chat_models import init_chat_model
+from langchain_core.tools import tool 
+from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
+from langchain_core.messages import SystemMessage, HumanMessage,\
+    AIMessage, ToolMessage
+### Typing libraries
+from typing import Optional, Literal, List
+from typing_extensions import TypedDict, Literal, Annotated
+### Tool libraries
+from pydantic import BaseModel, Field, field_validator
 from IPython.display import Image
 from PIL import Image as PImage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from datetime import datetime, timezone, timedelta
-    #class datetime.datetime(year, month, day, hour=0, minute=0, 
-    # second=0, microsecond=0, tzinfo=None, *, fold=0)
+from langmem import create_manage_memory_tool, create_search_memory_tool
+### Model libraries
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.store.memory import InMemoryStore
+from langgraph.checkpoint.postgres import PostgresSaver
+### Prompt libraries
+from prompts import *
+### Gmail API Libraries
+from google.oauth2.credentials import Credentials  
+    # Used to work with Gmail API once credentials are formed
+from google.auth.transport.requests import Request
+    # Used to request a new API once old one expires
+from google_auth_oauthlib.flow import InstalledAppFlow
+    # Gathers credentials from local file
+from googleapiclient.discovery import build
+    # Buils the GMail API client
+from googleapiclient.errors import HttpError
+    # USed to display errors
+from email.message import EmailMessage
+import base64
 
 ### Getting APIs
 load_dotenv()
@@ -40,10 +56,18 @@ google_api_key = os.getenv("GOOGLE_API_KEY")
 
 
 #### Setting up models
+### Base LLM
 llm = ChatGoogleGenerativeAI(
     api_key = google_api_key,
     model = "gemini-2.5-flash-lite",
 )
+### Base embedding model
+embedding_model = GoogleGenerativeAIEmbeddings(
+    api_key=google_api_key,
+    model="models/gemini-embedding-001",
+)
+
+
 
 #### Setting up DB storage utility
 DB_NAME = "output.sqlite"
@@ -55,10 +79,16 @@ storage = Storage(DB_NAME, TABLE_NAME)
 conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
     #"check_same_thread = False" => enables multi-thread usage
 memory = SqliteSaver(conn)
-cursor = conn.cursor()
-# print(dir(memory))
-# print(dir(memory.serde))
 
+### Long-term memory
+store = InMemoryStore(
+    index={"embed": embedding_model, "dims": 256}
+)
+    # Will need to switch to PostgresStore eventually
+## Exploring long-term mem.
+# store.list_namespaces()
+# store.search(('email_assistant', 'lance', 'collection'))
+# store.search(('email_assistant', 'lance', 'collection'), query="jim")
 
 
 
@@ -182,6 +212,7 @@ user_prompt = triage_user_prompt.format(
 
 
 
+
 ##### Create tools
 #### GMail API overview: 
     # https://developers.google.com/workspace/gmail/api/guides
@@ -194,22 +225,47 @@ user_prompt = triage_user_prompt.format(
         # OAuth site
     # https://developers.google.com/workspace/gmail/api/quickstart/python
         # Quick start with Python
-#### Setting the API scope and gmail libraries
 
-from google.oauth2.credentials import Credentials  
-    # Used to work with Gmail API once credentials are formed
-from google.auth.transport.requests import Request
-    # Used to request a new API once old one expires
-from google_auth_oauthlib.flow import InstalledAppFlow
-    # Gathers credentials from local file
-from googleapiclient.discovery import build
-    # Buils the GMail API client
-from googleapiclient.errors import HttpError
-    # USed to display errors
-from email.message import EmailMessage
-import base64
+##### Creating langmem tools
+manage_memory_tool = create_manage_memory_tool(
+    namespace=(
+        "email_assistant",
+        "{langgraph_user_id}",
+        "collection"
+    )
+)
+
+search_memory_tool = create_search_memory_tool(
+    namespace=(
+        "email_assistant",
+        "{langgraph_user_id}",
+        "collection"
+    )
+)
+
 
 ##### Creating email tool functions
+#### Creating Pydantic model for the tools
+### For "check_avaialbility"
+class TimeAvailability(BaseModel):
+    start: str = Field(
+        description="Moment at which to start calendar check (format = 'YYYY-MM-DDTHH:MM:SS+/-HH:MM')"
+    )
+    end: str = Field(
+        description="Moment at which to end calendar check (format = 'YYYY-MM-DDTHH:MM:SS+/-HH:MM')"
+    )
+    event_duration: Optional[int] = Field(
+        default=30,
+        description="Used to tell the duration of the event"
+    )
+    @field_validator("start", "end")
+    def validate_time(cls, time: str):
+        import re
+        pattern = r"^20[2-9]{1}[0-9]{1}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\+|\-)?\d{2}:\d{2}$"
+            # Patterns ensures year will be 2020+
+        if not re.match(pattern, time):
+            raise ValueError("time needs to be in ISO format string")
+        return time
 #### Scope of gmail api
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -243,101 +299,52 @@ def gather_credentials():
 #### Getting emails
 def getEmails():
     creds = gather_credentials()
-    try: 
+    to_return = {}
+    try:
         service = build('gmail', 'v1', credentials=creds)
         results = (
-            service.users().messages().list(maxResults = 15, userId="me", labelIds=["INBOX"]).execute()
+            service.users().messages()
+            .list(maxResults = 6, userId="me", labelIds=["INBOX"])
                 #Note: technically "INBOX" shows "ALL MAIL" mail
-                    # I.e., it isnt exclusive only to mails that are in inbox
-                    # for some reason it shows all mail
-                    # need to investigate if there's a way fpor me to only gilter the invox mail
-                    # at the same time, there is no prioblem in filtering through all mail
-                    # It will simply take a bit longer to process
-
+            .execute()
         )
-        messages = results.get("messages", [])
 
+        messages = results.get("messages", [])
         if not messages:
             print("No messages found.")
-            return
-        
-        for i, msg in enumerate(messages):
-            if i != 5: continue
+            return to_return
+    
+    except HttpError as error:
+        print(f"Error: {error}")
 
-            txt = (
-                service.users().messages().get(userId="me", id=msg["id"]).execute()
-            )
-
-            ### Creating webpage simulation of email
-            # try:
-            #     encoded_data = txt['payload']['body']['data']
-            #     # print(f'FIRST ENCODED DATA: {encoded_data}')
-            # except: pass
-
-            # try:
-            #     encoded_data = txt['payload']['parts'][1]['body']['data']
-            #     # print(f'SECOND ENCODED DATA: {encoded_data}')
-            # except: pass
-
-            # try:
-            #     encoded_data = txt['payload']['parts'][0]['parts'][0]['body']['data']
-            #     # print(f'THIRD ENCODED DATA: {encoded_data}')
-            # except: pass
-
-            # encoded_data = encoded_data.replace("-","+").replace("_","/")
-            #     #Necessary to decode the email properly
-            # decoded_data = base64.b64decode(encoded_data)
-            # # print(decoded_data)
-            # soup = BeautifulSoup(decoded_data , "html.parser")
-            # # body = soup.body()
-            # # main = soup.find('main')
-            # # print(main)
-
-            # with open('output.html', 'w') as file:
-            #     file.write(str(soup))
-            #         #SHOWS NICE HTML WEBPAGE
-
-
-
-            ### Extracting: author, subject, to, email_thread
-            result = {}
+    for msg in messages:
+        txt = (
+            service.users().messages()
+            .get(userId="me", id=msg["id"]).execute()
+        )
+        try:
             payload = txt['payload']
             headers = payload['headers']
             body = payload['body']
             parts = payload['parts']
-            # print(txt.keys())
-            # print('='*30)
-            # print(payload.keys())
-            # print('='*30)
-            # print(headers)
-            # print('='*30)
-            # print(body)
-            # print('='*30)
-            # print(parts[0])
-            # print('='*30)
-            # print(parts[1])
-            # print('='*30)
-            for data in headers:
-                if data['name'] == 'Subject':
-                    result["subject"] = data['value']
-                if data['name'] == "From":
-                    result["author"] = data['value']
-                if data['name'] == 'To':
-                    result["to"] = data['value']
+        except: continue
+        for data in headers:
+            if data['name'] == 'Subject':
+                to_return["subject"] = data['value']
+            if data['name'] == "From":
+                to_return["author"] = data['value']
+            if data['name'] == 'To':
+                to_return["to"] = data['value']
+        encoded_body = parts[0]['body']['data']
+        encoded_body = encoded_body.replace("-","+").replace("_","/")
+            #Necessary to decode the email properly
+        decoded_data = base64.b64decode(encoded_body)
+        decoded_data = decoded_data.decode('utf-8')
+        to_return['email_thread'] = decoded_data
+        break
+    
+    return to_return
 
-            encoded_body = parts[0]['body']['data']
-            encoded_body = encoded_body.replace("-","+").replace("_","/")
-                #Necessary to decode the email properly
-            decoded_data = base64.b64decode(encoded_body)
-            decoded_data = decoded_data.decode('utf-8')
-            result['email_thread'] = decoded_data
-            break
-
-
-    except HttpError as error:
-        print(f"Error: {error}")
-
-    return result
 
 
 
@@ -604,17 +611,17 @@ def check_availability(
     end = datetime.fromisoformat(end)
     day_diff = end - start
     day_diff = day_diff.days
-    # print(day_diff)
     day_delta = timedelta(days = 1)
-    # print(day_delta)
     tmp_start = start
     tmp_end = start + day_delta
+    result = ""
     for i in range(day_diff):
-        check_day_availability(tmp_start, tmp_end, event_duration)
-        # print(f"{tmp_start} - {tmp_end}")
+        result += check_day_availability(tmp_start, tmp_end, event_duration)
+        result += '\n'
         tmp_start = tmp_end
         tmp_end = tmp_end + day_delta
-    return
+    print(f"FINAL: {result}")
+    return result
 
 
 
@@ -682,7 +689,14 @@ def react_sys_prompt():
 
 
 ### Assembling main state-agent
-tools=[write_email, schedule_event, check_availability]
+tools=[
+    write_email, 
+    schedule_event, 
+    check_availability,
+    manage_memory_tool,
+    search_memory_tool,
+]
+
 responder_agent = create_agent(
     model=llm,
     tools=tools,
@@ -730,23 +744,28 @@ responder_agent = create_agent(
 
 
 
-
 ##### Creating email assistant MAS
 #### Creating the agent's state
 class AgentState(TypedDict):
     email_input: dict
     messages: Annotated[List[AnyMessage], operator.add]
+    metrics: Annotated[dict[str, dict[str,int]], operator.or_]
 
 #### Creating nodes
 ### Router node
 def router_node(state: AgentState) -> Command[
     Literal["responder", "__end__"]
 ]:
+    ## Creating metrics for email assistant to use
+    metrics = Metrics()
+
+    ## Setting up the email to be sent to agent
     author = state['email_input']['author']
     to = state['email_input']['to']
     subject = state['email_input']['subject']
     email_thread = state['email_input']['email_thread']
 
+    ## Setting up router's system prompt
     system_prompt = triage_system_prompt.format(
         full_name=profile["full_name"],
         name=profile["name"],
@@ -756,35 +775,52 @@ def router_node(state: AgentState) -> Command[
         triage_email=prompt_instructions["triage_rules"]["respond"],
         examples=None
     )
+
+    ## Setting up router's user prompt
     user_prompt = triage_user_prompt.format(
         author=author, 
         to=to, 
         subject=subject, 
         email_thread=email_thread
     )
+
+    ## Invoking the router
     result = llm_router.invoke(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
     )
+
+    ## Analyzing the invoked metrics
+    ai_msg = result['raw']
+    extract = metrics.extract_tokens_used(ai_msg, "router_node")
+    metrics = metrics.aggregate(extract)
+    print('router metrics')
+    print(metrics.history)
+    print('\n' + '=' * 50 + '\n')
+    metrics_update = {
+        "metrics": metrics.history
+    }
+
+    ## Setting up next graph traversal steps
     result = result['parsed']
     if result.classification == "respond":
         print("📧 Classification: RESPOND - This email requires a response")
         goto = "responder"
-        update = {
+        update = metrics_update | {
             "messages": [
                 HumanMessage(content=f"Respond to the email {state['email_input']}"),
             ]
         }
     elif result.classification == "ignore":
         print("🚫 Classification: IGNORE - This email can be safely ignored")
-        update = None
+        update = metrics_update
         goto = END
     elif result.classification == "notify":
         # If real life, this would do something else
         print("🔔 Classification: NOTIFY - This email contains important information")
-        update = None
+        update = metrics_update
         goto = END
     else:
         raise ValueError(f"Invalid classification: {result.classification}")
@@ -792,27 +828,29 @@ def router_node(state: AgentState) -> Command[
 
 ### Responder node
 def responder_node(state: AgentState):
+    ## Creating metrics for email assistant to use
+    metrics = Metrics()
     ## Extract user prompt from agent state
     user_prompt = state['messages'][-1]
-    print(f'Stored user prompt:\n{user_prompt}\n')
     ## Invoke agent with user prompt
     response = responder_agent.invoke(
         {"messages": [user_prompt]}
     )
-        # This will be an AIMessage data type
+        # It will return the following format:
+            #response = {"message": [AnyMessage]}
+    ## Analyzing metrics used
+    for i, msg in enumerate(response['messages']):
+        # print(msg)
+        if (type(msg) != AIMessage): continue
+        extract = metrics.extract_tokens_used(msg, f"responder_node_{i}")
+        metrics = metrics.aggregate(extract)
     ## Update the agent state with messages
-    print(f"Response: {response}")
+    print(f"Responder response: {response}\n\n")
 
-    return {"messages": [response]}
+    return {"messages": [response], "metrics": metrics.history}
 
 
 #### Assembling the email assistant graph
-    # Not going to use python "class"
-        # Main benefit - modularity
-            # I can create the node's fcnality in other files
-            # Can import those node fcnalities into this file
-            # Use imports directly, w.o./ having to put inside "class"
-
 email_agent = StateGraph(AgentState)
 email_agent = email_agent.add_node("router", router_node)
 email_agent = email_agent.add_node("responder", responder_node)
@@ -820,6 +858,15 @@ email_agent = email_agent.add_edge(START, "router")
 email_agent = email_agent.compile(
     checkpointer=memory,
 )
+
+
+
+
+
+
+
+
+
 
 
 #### Visualizing the email assistnat graph
@@ -832,6 +879,7 @@ email_agent = email_agent.compile(
 # print(email)
 config = {
     'configurable':{
+        'langgraph_user_id': "jp",
         'thread_id': str(1),
     }
 }
@@ -864,22 +912,22 @@ config = {
     }
 }
 # print(email_agent.get_state(config))
-main_history = email_agent.get_state_history(config)
-hist_list = list(main_history)
-print('MAIN HISTORY\n\n')
-analyzer.analyze_history(hist_list, display_fields)
+# main_history = email_agent.get_state_history(config)
+# hist_list = list(main_history)
+# print('MAIN HISTORY\n\n')
+# analyzer.analyze_history(hist_list, display_fields)
 
 
-config = {
-    'configurable':{
-        'thread_id': str(1),
-        'checkpoint_ns': "responder:031a0c4f-e821-0b05-537c-93279c2a558d"
-    }
-}
-react_history = email_agent.get_state_history(config)
-hist_list = list(react_history)
-print("\n\n\n\nREPSONDER HISTORY\n\n\n\n")
-analyzer.analyze_history(hist_list, display_fields)
+# config = {
+#     'configurable':{
+#         'thread_id': str(1),
+#         'checkpoint_ns': "responder:031a0c4f-e821-0b05-537c-93279c2a558d"
+#     }
+# }
+# react_history = email_agent.get_state_history(config)
+# hist_list = list(react_history)
+# print("\n\n\n\nREPSONDER HISTORY\n\n\n\n")
+# analyzer.analyze_history(hist_list, display_fields)
 
 
 

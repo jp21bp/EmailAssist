@@ -129,7 +129,7 @@ Alice""",
 
 ##### Creating email tool functions
 #### Creating Pydantic model for the tools
-###
+### For "check_avaialbility"
 class TimeAvailability(BaseModel):
     start: str = Field(
         description="Moment at which to start calendar check (format = 'YYYY-MM-DDTHH:MM:SS+/-HH:MM')"
@@ -252,7 +252,6 @@ def write_email(
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
         create_message = {"raw": encoded_message}
-        # pylint: disable=E1101
         send_message = (
             service.users()
             .messages()
@@ -758,7 +757,7 @@ email_agent = email_agent.compile(
 
 ##### Working with the email assistant
 #### Getting desired email
-email = getEmails()
+# email = getEmails()
 # print(email)
 
 # check_availability(
@@ -767,17 +766,19 @@ email = getEmails()
 #     30
 # )
 
+current_thread = 5
+
 #### Setting up config
 config = {
     'configurable':{
-        'thread_id': str(5),
+        'thread_id': str(current_thread),
     }
 }
 
 #### Invoking and saving response
-response = email_agent.invoke({'email_input': email}, config)
-storage.save_data(response, 5, "calendar_availability")
-print(response)
+# response = email_agent.invoke({'email_input': email}, config)
+# storage.save_data(response, current_thread, "calendar_availability")
+# print(response)
 
 
 # response = storage.retrieve_data(3)
