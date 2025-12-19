@@ -28,7 +28,8 @@ from pydantic import BaseModel, Field, field_validator
 from IPython.display import Image
 from PIL import Image as PImage
 from datetime import datetime, timezone, timedelta
-from langmem import create_manage_memory_tool, create_search_memory_tool
+from langmem import create_manage_memory_tool,\
+    create_search_memory_tool, create_multi_prompt_optimizer
 ### Model libraries
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -94,6 +95,13 @@ store = InMemoryStore(
 # store.search(('email_assistant', 'lance', 'collection'), query="jim")
 
 
+#### SEtting up the config, used in different occasions
+config = {
+    'configurable':{
+        'langgraph_user_id': "lance",
+        'thread_id': str(1),
+    }
+}
 
 
 #### Setup profile, GENERAL prompt, and example email
@@ -871,8 +879,24 @@ def check_availability(
 ###  Turn ambigous prompt for the main single-agent into specific prompt
 ## Importing ambiguous prompt for main agent
 def react_sys_prompt():
+    ## Setting up namespace to retrieve isntructions
+    langgraph_user_id = config["configurable"]['langgraph_user_id']
+    namespace = (langgraph_user_id,)
+
+    # Actually retrieve the instructions
+    result = store.get(namespace, "agent_instructions")
+    if result is None:
+        store.put(
+            namespace, 
+            "agent_instructions", 
+            {"prompt": prompt_instructions["agent_instructions"]}
+        )
+        prompt = prompt_instructions["agent_instructions"]
+    else:
+        prompt = result.value['prompt']
+
     content = agent_system_prompt.format(
-        instructions=prompt_instructions["agent_instructions"],
+        instructions=prompt,
         **profile
     )
     return SystemMessage(content=content)
@@ -957,10 +981,11 @@ def router_node(state: AgentState) -> Command[
     subject = state['email_input']['subject']
     email_thread = state['email_input']['email_thread']
 
-    ## Setting up the namespace to get correct long-term storage
+    ## Setting up the namespace to retrieve few-shot exs
+    langgraph_user_id = config['configurable']['langgraph_user_id']
     namespace = (
         "email_assistant",
-        config['configurable']['langgraph_user_id'],
+        langgraph_user_id,
         "examples"
     )
 
@@ -973,15 +998,55 @@ def router_node(state: AgentState) -> Command[
     ## Turning extracted emails into fewshot examples
     examples=format_few_shot_examples(examples)
 
+    ## Setting up namespace to retrieve prompt-instructions
+    namespace = (langgraph_user_id,)
+
+    ## Retrieving specific prompts for router
+    # Ignore prompt-specifics
+    result = store.get(namespace, "triage_ignore")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_ignore", 
+            {"prompt": prompt_instructions["triage_rules"]["ignore"]}
+        )
+        ignore_prompt = prompt_instructions["triage_rules"]["ignore"]
+    else:
+        ignore_prompt = result.value['prompt']
+
+    # Notify prompt-specifics
+    result = store.get(namespace, "triage_notify")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_notify", 
+            {"prompt": prompt_instructions["triage_rules"]["notify"]}
+        )
+        notify_prompt = prompt_instructions["triage_rules"]["notify"]
+    else:
+        notify_prompt = result.value['prompt']
+
+    # Respond prompt-specifcs
+    result = store.get(namespace, "triage_respond")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_respond", 
+            {"prompt": prompt_instructions["triage_rules"]["respond"]}
+        )
+        respond_prompt = prompt_instructions["triage_rules"]["respond"]
+    else:
+        respond_prompt = result.value['prompt']
+
     ## Setting up router's system prompt
     system_prompt = triage_system_prompt.format(
         full_name=profile["full_name"],
         name=profile["name"],
         user_profile_background=profile["user_profile_background"],
-        triage_no=prompt_instructions["triage_rules"]["ignore"],
-        triage_notify=prompt_instructions["triage_rules"]["notify"],
-        triage_email=prompt_instructions["triage_rules"]["respond"],
-        examples=None
+        triage_no=ignore_prompt,
+        triage_notify=notify_prompt,
+        triage_email=respond_prompt,
+        examples=examples
     )
 
     ## Setting up router's user prompt
@@ -1078,6 +1143,165 @@ email_agent = email_agent.compile(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##### Creating the update-agent
+    # Will perform updates in the background
+#### Creating the agent
+optimizer = create_multi_prompt_optimizer(
+    llm,
+    kind="prompt_memory",
+)
+    # https://langchain-ai.github.io/langmem/reference/prompt_optimization/#langmem.create_multi_prompt_optimizer
+
+
+#### Creating the update-prompts for update-agent
+# prompts = [
+#     {
+#         "name": "main_agent",
+#         "prompt": store.get(("lance",), "agent_instructions").value['prompt'],
+#         "update_instructions": "keep the instructions short and to the point",
+#         "when_to_update": "Update this prompt whenever there is feedback on how the agent should write emails or schedule events"
+        
+#     },
+#     {
+#         "name": "triage-ignore", 
+#         "prompt": store.get(("lance",), "triage_ignore").value['prompt'],
+#         "update_instructions": "keep the instructions short and to the point",
+#         "when_to_update": "Update this prompt whenever there is feedback on which emails should be ignored"
+
+#     },
+#     {
+#         "name": "triage-notify", 
+#         "prompt": store.get(("lance",), "triage_notify").value['prompt'],
+#         "update_instructions": "keep the instructions short and to the point",
+#         "when_to_update": "Update this prompt whenever there is feedback on which emails the user should be notified of"
+
+#     },
+#     {
+#         "name": "triage-respond", 
+#         "prompt": store.get(("lance",), "triage_respond").value['prompt'],
+#         "update_instructions": "keep the instructions short and to the point",
+#         "when_to_update": "Update this prompt whenever there is feedback on which emails should be responded to"
+
+#     },
+# ]
+
+# #### Updating prompts in long-term storage
+# def update_instructions(update_agent_response):
+#     for i, updated_prompt in enumerate(update_agent_response):
+#         old_prompt = prompts[i]
+#         if updated_prompt['prompt'] != old_prompt['prompt']:
+#             name = old_prompt['name']
+#             print(f"updated {name}")
+#             if name == "main_agent":
+#                 store.put(
+#                     ("lance",),
+#                     "agent_instructions",
+#                     {"prompt":updated_prompt['prompt']}
+#                 )
+#             if name == "triage-ignore":
+#                 store.put(
+#                     ("lance",),
+#                     "triage_ignore",
+#                     {"prompt":updated_prompt['prompt']}
+#                 )
+#             if name == "triage-notify":
+#                 store.put(
+#                     ("lance",),
+#                     "triage_notify",
+#                     {"prompt":updated_prompt['prompt']}
+#                 )
+#             if name == "triage-respond":
+#                 store.put(
+#                     ("lance",),
+#                     "triage_respond",
+#                     {"prompt":updated_prompt['prompt']}
+#                 )
+#             else:
+#                 #raise ValueError
+#                 print(f"Encountered {name}, implement the remaining stores!")
+
+
+#### SImulating an update isntructions
+# ### Invoke email assistant
+# response = email_agent.invoke(
+#     {"email_input": sample_email},
+#     config=config
+# )
+#     #outout: 📧 Classification: RESPOND - This email requires a response
+
+# ### Gather the outputs from email assistant
+# conversations = [
+#     (
+#         response['messages'],
+#         "Ignore any emails from Alice Jones"
+#     )
+# ]
+
+# ### Invoke the update agent
+# updated = optimizer.invoke(
+#     {"trajectories": conversations, "prompts": prompts}
+# )
+
+# ### Update the isntructions based on update agent's response
+# update_instructions(updated)
+
+# ### Verify that the isntructions got updated
+# store.get(("lance",), "triage_ignore").value['prompt']
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #### Visualizing the email assistnat graph
 # print(dir(email_agent))
 # print(email_agent.get_graph().draw_ascii())
@@ -1086,12 +1310,6 @@ email_agent = email_agent.compile(
 
 # email = getEmails()
 # print(email)
-config = {
-    'configurable':{
-        'langgraph_user_id': "jp",
-        'thread_id': str(1),
-    }
-}
 # response = email_agent.invoke({'email_input': email}, config)
 
 # storage.save_data(response, 1, "test_response_1")
