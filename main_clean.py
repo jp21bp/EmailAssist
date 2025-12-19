@@ -19,7 +19,7 @@ from langchain_core.messages import SystemMessage, HumanMessage,\
 from typing import Optional, Literal, List
 from typing_extensions import TypedDict, Literal, Annotated
 ### Tool libraries
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from IPython.display import Image
 from PIL import Image as PImage
 from datetime import datetime, timezone, timedelta
@@ -128,6 +128,28 @@ Alice""",
 
 
 ##### Creating email tool functions
+#### Creating Pydantic model for the tools
+###
+class TimeAvailability(BaseModel):
+    start: str = Field(
+        description="Moment at which to start calendar check (format = 'YYYY-MM-DDTHH:MM:SS+/-HH:MM')"
+    )
+    end: str = Field(
+        description="Moment at which to end calendar check (format = 'YYYY-MM-DDTHH:MM:SS+/-HH:MM')"
+    )
+    event_duration: Optional[int] = Field(
+        default=30,
+        description="Used to tell the duration of the event"
+    )
+    @field_validator("start", "end")
+    def validate_time(cls, time: str):
+        import re
+        pattern = r"^20[2-9]{1}[0-9]{1}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\+|\-)?\d{2}:\d{2}$"
+            # Patterns ensures year will be 2020+
+        if not re.match(pattern, time):
+            raise ValueError("time needs to be in ISO format string")
+        return time
+
 #### Scope of gmail api
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -428,7 +450,7 @@ def check_day_availability(
 
 
 #### General availability checker tool
-# @tool
+@tool(args_schema=TimeAvailability)
 def check_availability(
     start: str, # Will be in iso format
     end: str,   # Will be in iso format
@@ -748,18 +770,20 @@ email = getEmails()
 #### Setting up config
 config = {
     'configurable':{
-        'thread_id': str(3),
+        'thread_id': str(5),
     }
 }
 
 #### Invoking and saving response
-# response = email_agent.invoke({'email_input': email}, config)
-# storage.save_data(response, 3, "another_simple_response")
+response = email_agent.invoke({'email_input': email}, config)
+storage.save_data(response, 5, "calendar_availability")
+print(response)
 
-response = storage.retrieve_data(3)
+
+# response = storage.retrieve_data(3)
 # print(response['messages'])
-for i, msg in enumerate(response['messages'][1]['messages']):
-    print(f"Msg {i}: \n{msg}\n\n")
+# for i, msg in enumerate(response['messages'][1]['messages']):
+#     print(f"Msg {i}: \n{msg}\n\n")
 # print('\n\n\n')
 # print(email_agent.get_state(config))
 
