@@ -23,8 +23,13 @@ from pydantic import BaseModel, Field, field_validator
 from IPython.display import Image
 from PIL import Image as PImage
 from datetime import datetime, timezone, timedelta
+from langmem import create_manage_memory_tool,\
+    create_search_memory_tool, create_multi_prompt_optimizer
 ### Model libraries
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI,GoogleGenerativeAIEmbeddings
+### Storage libraries
+from langgraph.store.memory import InMemoryStore
+from langgraph.store.postgres import PostgresStore
 from langgraph.checkpoint.sqlite import SqliteSaver
 ### Prompt libraries
 from prompts import *
@@ -48,9 +53,16 @@ google_api_key = os.getenv("GOOGLE_API_KEY")
 
 
 #### Setup models
+### Base LLM
 llm = ChatGoogleGenerativeAI(
     api_key = google_api_key,
     model = "gemini-2.5-flash-lite",
+)
+
+### Base embedding model
+embedding_model = GoogleGenerativeAIEmbeddings(
+    api_key=google_api_key,
+    model="models/gemini-embedding-001",
 )
 
 #### Setting up DB storage utility
@@ -64,6 +76,35 @@ storage = Storage(DB_NAME, TABLE_NAME)
 conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
     #"check_same_thread = False" => enables multi-thread usage
 memory = SqliteSaver(conn)
+
+
+# ### Long-term memory
+# connection_string = "postgresql://jp:jp123@localhost:5432/lg_store"
+# conn2 = Connection.connect(connection_string, autocommit=True)
+#     #"postgresql://user:pass@localhost:5432/dbname"
+# store = PostgresStore(
+#     conn2,
+#     index={"embed": embedding_model, "dims": 3072}
+# )
+# store.setup()
+    # This is needed in order to capture the tables schema needed in the database
+
+store = InMemoryStore()
+
+
+#### Setting up the configurations for the email agent
+    # It's useful to have the config at the beggning of the file
+    # Info can be extracted from it and used with the rest of the fiel
+    
+LG_USER_ID = "lance"
+THREAD_NUM = 1
+
+config = {
+    'configurable':{
+        'langgraph_user_id': LG_USER_ID,
+        'thread_id': str(THREAD_NUM),
+    }
+}
 
 
 
@@ -82,6 +123,22 @@ prompt_instructions = {
     },
     "agent_instructions": "Use these tools when appropriate to help manage John's tasks efficiently."
 }
+
+store.put(
+            (LG_USER_ID,),
+            "triage_ignore", 
+            {"prompt": prompt_instructions["triage_rules"]["ignore"]}
+        )
+store.put(
+            (LG_USER_ID,), 
+            "triage_notify", 
+            {"prompt": prompt_instructions["triage_rules"]["notify"]}
+        )
+store.put(
+            (LG_USER_ID,), 
+            "triage_respond", 
+            {"prompt": prompt_instructions["triage_rules"]["respond"]}
+        )
 
 email = { # Example incoming email
     "from": "Alice Smith <alice.smith@company.com>",
@@ -122,11 +179,144 @@ Alice""",
 
 
 
+##### Setting up few-shot memory for router
+#### Creating data model for the few-shot examples
+data_model = """Email Subject: {subject}
+Email From: {from_email}
+Email To: {to_email}
+Email Content: 
+```
+{content}
+```
+> Triage Result: {result}"""
+
+#### Creating helper fcn to format data model
+def format_few_shot_examples(examples):
+    strs = ["Here are some previous examples:"]
+    for eg in examples:
+        strs.append(
+            data_model.format(
+                subject=eg.value["email"]["subject"],
+                to_email=eg.value["email"]["to"],
+                from_email=eg.value["email"]["author"],
+                content=eg.value["email"]["email_thread"][:400],
+                result=eg.value["label"],
+            )
+        )
+    return "\n\n------------\n\n".join(strs)
+
+#### Creating sample emails to use in few-shot exs
+email1 = { # SAme as "email" above
+    "author": "Alice Smith <alice.smith@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Quick question about API documentation",
+    "email_thread": """Hi John,
+
+    I was reviewing the API documentation for the new authentication service and noticed a few endpoints seem to be missing from the specs. Could you help clarify if this was intentional or if we should update the docs?
+
+    Specifically, I'm looking at:
+    - /auth/refresh
+    - /auth/validate
+
+    Thanks!
+    Alice"""
+}
+
+email2 = {
+    "author": "Sarah Chen <sarah.chen@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Update: Backend API Changes Deployed to Staging",
+    "email_thread": """Hi John,
+
+    Just wanted to let you know that I've deployed the new authentication endpoints we discussed to the staging environment. Key changes include:
+
+    - Implemented JWT refresh token rotation
+    - Added rate limiting for login attempts
+    - Updated API documentation with new endpoints
+
+    All tests are passing and the changes are ready for review. You can test it out at staging-api.company.com/auth/*
+
+    No immediate action needed from your side - just keeping you in the loop since this affects the systems you're working on.
+
+    Best regards,
+    Sarah
+    """
+}
+
+#### COuple the sample emails with a label
+data1 = {
+    "email": email1,
+    "label": "respond"
+}
+
+data2 = {
+    "email": email2,
+    "label": "ignore"
+}
+
+#### Storing these couple few-shot exams into long-term storage
+import uuid
+
+store.put(
+    ("email_assistant", LG_USER_ID, "examples"), 
+    str(uuid.uuid4()), 
+    data1
+)
+
+store.put(
+    ("email_assistant", LG_USER_ID, "examples"), 
+    str(uuid.uuid4()), 
+    data2
+)
 
 
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###### Creating tools
+##### Creating langmem tools
+manage_memory_tool = create_manage_memory_tool(
+    namespace=(
+        "email_assistant",
+        LG_USER_ID,
+        "collection"
+    )
+)
+
+search_memory_tool = create_search_memory_tool(
+    namespace=(
+        "email_assistant",
+        LG_USER_ID,
+        "collection"
+    )
+)
 ##### Creating email tool functions
 #### Creating Pydantic model for the tools
 ### For "check_avaialbility"
@@ -530,43 +720,49 @@ class Router(BaseModel):
 ### Creating model with pydantic
 llm_router = llm.with_structured_output(Router, include_raw = True)
 
-### Creating prompts for router
-system_prompt = triage_system_prompt.format(
-    full_name=profile["full_name"],
-    name=profile["name"],
-    examples=None,
-    user_profile_background=profile["user_profile_background"],
-    triage_no=prompt_instructions["triage_rules"]["ignore"],
-    triage_notify=prompt_instructions["triage_rules"]["notify"],
-    triage_email=prompt_instructions["triage_rules"]["respond"],
-)
-user_prompt = triage_user_prompt.format(
-    author=email["from"],
-    to=email["to"],
-    subject=email["subject"],
-    email_thread=email["body"],
-)
-
-
 
 
 #### Responder agent
-### Creating system prompt
+## Importing ambiguous prompt for main agent
 def react_sys_prompt():
+    ## Setting up namespace to retrieve isntructions
+    langgraph_user_id = config["configurable"]['langgraph_user_id']
+    namespace = (langgraph_user_id,)
+
+    # Actually retrieve the instructions
+    result = store.get(namespace, "agent_instructions")
+    if result is None:
+        store.put(
+            namespace, 
+            "agent_instructions", 
+            {"prompt": prompt_instructions["agent_instructions"]}
+        )
+        prompt = prompt_instructions["agent_instructions"]
+    else:
+        prompt = result.value['prompt']
+
     content = agent_system_prompt.format(
-        instructions=prompt_instructions["agent_instructions"],
+        instructions=prompt,
         **profile
     )
     return SystemMessage(content=content)
 
-### Assembling responder agent
-tools=[write_email, schedule_event, check_availability]
+
+
+### Assembling the responder agent
+tools=[
+    write_email, 
+    schedule_event, 
+    check_availability,
+    manage_memory_tool,
+    search_memory_tool,
+]
+
 responder_agent = create_agent(
     model=llm,
     tools=tools,
     system_prompt=react_sys_prompt(),
 )
-
 
 
 
@@ -630,15 +826,73 @@ def router_node(state: AgentState) -> Command[
     subject = state['email_input']['subject']
     email_thread = state['email_input']['email_thread']
 
+    ## Setting up the namespace to retrieve few-shot exs
+    namespace = (
+        "email_assistant",
+        LG_USER_ID,
+        "examples"
+    )
+
+    ## Extracting the emails that most closely match incoing email
+    examples = store.search(
+        namespace, 
+        query=str({"email": state['email_input']})
+    ) 
+
+    ## Turning extracted emails into fewshot examples
+    examples=format_few_shot_examples(examples)
+
+    ## Setting up namespace to retrieve prompt-instructions
+    namespace = (LG_USER_ID,)
+
+
+    ## Retrieving specific prompts for router
+    # Ignore prompt-specifics
+    result = store.get(namespace, "triage_ignore")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_ignore", 
+            {"prompt": prompt_instructions["triage_rules"]["ignore"]}
+        )
+        ignore_prompt = prompt_instructions["triage_rules"]["ignore"]
+    else:
+        ignore_prompt = result.value['prompt']
+
+    # Notify prompt-specifics
+    result = store.get(namespace, "triage_notify")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_notify", 
+            {"prompt": prompt_instructions["triage_rules"]["notify"]}
+        )
+        notify_prompt = prompt_instructions["triage_rules"]["notify"]
+    else:
+        notify_prompt = result.value['prompt']
+
+    # Respond prompt-specifcs
+    result = store.get(namespace, "triage_respond")
+    if result is None:
+        store.put(
+            namespace, 
+            "triage_respond", 
+            {"prompt": prompt_instructions["triage_rules"]["respond"]}
+        )
+        respond_prompt = prompt_instructions["triage_rules"]["respond"]
+    else:
+        respond_prompt = result.value['prompt']
+
+
     ## Setting up router's system prompt
     system_prompt = triage_system_prompt.format(
         full_name=profile["full_name"],
         name=profile["name"],
         user_profile_background=profile["user_profile_background"],
-        triage_no=prompt_instructions["triage_rules"]["ignore"],
-        triage_notify=prompt_instructions["triage_rules"]["notify"],
-        triage_email=prompt_instructions["triage_rules"]["respond"],
-        examples=None
+        triage_no=ignore_prompt,
+        triage_notify=notify_prompt,
+        triage_email=respond_prompt,
+        examples=examples
     )
 
     ## Setting up router's user prompt
@@ -648,6 +902,7 @@ def router_node(state: AgentState) -> Command[
         subject=subject, 
         email_thread=email_thread
     )
+
 
     ## Invoking the router
     result = llm_router.invoke(
@@ -722,6 +977,7 @@ email_agent = email_agent.add_node("responder", responder_node)
 email_agent = email_agent.add_edge(START, "router")
 email_agent = email_agent.compile(
     checkpointer=memory,
+    store=store
 )
 
 
@@ -755,25 +1011,105 @@ email_agent = email_agent.compile(
 
 
 
+##### Creating the update-agent
+    # Will perform updates in the backgroun
+#### Creating the agent
+optimizer = create_multi_prompt_optimizer(
+    llm,
+    kind="prompt_memory",
+)
+    # https://langchain-ai.github.io/langmem/reference/prompt_optimization/#langmem.create_multi_prompt_optimizer
+
+
+#### Creating the update-prompts for update-agent
+prompts = [
+    {
+        "name": "main_agent",
+        "prompt": store.get((LG_USER_ID,), "agent_instructions").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on how the agent should write emails or schedule events"
+        
+    },
+    {
+        "name": "triage-ignore", 
+        "prompt": store.get((LG_USER_ID,), "triage_ignore").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails should be ignored"
+
+    },
+    {
+        "name": "triage-notify", 
+        "prompt": store.get((LG_USER_ID,), "triage_notify").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails the user should be notified of"
+
+    },
+    {
+        "name": "triage-respond", 
+        "prompt": store.get((LG_USER_ID,), "triage_respond").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails should be responded to"
+
+    },
+]
+
+
+#### Updating prompts in long-term storage
+def update_instructions(update_agent_response):
+    for i, updated_prompt in enumerate(update_agent_response):
+        old_prompt = prompts[i]
+        if updated_prompt['prompt'] != old_prompt['prompt']:
+            name = old_prompt['name']
+            print(f"updated {name}")
+            if name == "main_agent":
+                store.put(
+                    ("lance",),
+                    "agent_instructions",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-ignore":
+                store.put(
+                    ("lance",),
+                    "triage_ignore",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-notify":
+                store.put(
+                    ("lance",),
+                    "triage_notify",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-respond":
+                store.put(
+                    ("lance",),
+                    "triage_respond",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            else:
+                #raise ValueError
+                print(f"Encountered {name}, implement the remaining stores!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ##### Working with the email assistant
 #### Getting desired email
 # email = getEmails()
 # print(email)
 
-# check_availability(
-#     '2025-12-22T00:00:00-05:00',
-#     '2025-12-26T00:00:00-05:00',
-#     30
-# )
-
-current_thread = 5
-
-#### Setting up config
-config = {
-    'configurable':{
-        'thread_id': str(current_thread),
-    }
-}
 
 #### Invoking and saving response
 # response = email_agent.invoke({'email_input': email}, config)

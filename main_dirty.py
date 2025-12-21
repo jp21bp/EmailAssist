@@ -6,6 +6,9 @@
             # For StateSnapshot analysis
         # Fill in with real APIs from Gmail
 
+#### Postgres cheatsheet
+    # https://gist.github.com/apolloclark/ea5466d5929e63043dcf
+
 
 ##### General setup
 #### Import libraries
@@ -34,7 +37,9 @@ from langmem import create_manage_memory_tool,\
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.memory import InMemoryStore
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.postgres import PostgresStore
+from psycopg import Connection
+# from langgraph.store.sqlite import SqliteStore
 ### Prompt libraries
 from prompts import *
 ### Gmail API Libraries
@@ -62,12 +67,12 @@ llm = ChatGoogleGenerativeAI(
     api_key = google_api_key,
     model = "gemini-2.5-flash-lite",
 )
+
 ### Base embedding model
 embedding_model = GoogleGenerativeAIEmbeddings(
     api_key=google_api_key,
     model="models/gemini-embedding-001",
 )
-
 
 
 #### Setting up DB storage utility
@@ -81,10 +86,20 @@ conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
     #"check_same_thread = False" => enables multi-thread usage
 memory = SqliteSaver(conn)
 
-### Long-term memory
-store = InMemoryStore(
-    index={"embed": embedding_model, "dims": 256}
-)
+# ### Long-term memory
+# connection_string = "postgresql://jp:jp123@localhost:5432/lg_store"
+# conn2 = Connection.connect(connection_string, autocommit=True)
+#     #"postgresql://user:pass@localhost:5432/dbname"
+# store = PostgresStore(
+#     conn2,
+#     index={"embed": embedding_model, "dims": 3072}
+# )
+# store.setup()
+    # This is needed in order to capture the tables schema needed in the database
+
+store = InMemoryStore()
+
+# dir(store)
     # Will need to switch to PostgresStore eventually
     # Note this store can be used in ANY PART of the email assist graph
         # Including by the sub-graphs/nodes/agents of the graph
@@ -96,12 +111,17 @@ store = InMemoryStore(
 
 
 #### SEtting up the config, used in different occasions
+    # IT's helpful to have the config at the beggining of the file
+    
+LG_USER_ID = "lance"
 config = {
     'configurable':{
-        'langgraph_user_id': "lance",
+        'langgraph_user_id': LG_USER_ID,
         'thread_id': str(1),
     }
 }
+
+
 
 
 #### Setup profile, GENERAL prompt, and example email
@@ -119,6 +139,39 @@ prompt_instructions = {
     },
     "agent_instructions": "Use these tools when appropriate to help manage John's tasks efficiently."
 }
+
+store.put(
+            ("lance",),
+            "triage_ignore", 
+            {"prompt": prompt_instructions["triage_rules"]["ignore"]}
+        )
+store.put(
+            ("lance",), 
+            "triage_notify", 
+            {"prompt": prompt_instructions["triage_rules"]["notify"]}
+        )
+store.put(
+            ("lance",), 
+            "triage_respond", 
+            {"prompt": prompt_instructions["triage_rules"]["respond"]}
+        )
+
+# print('GETTING ALL ITEMS INSIDE STORE')
+# result = store.get(("lance",), "triage_ignore")
+# print(result)
+
+#### Placing in the prompt instructions into their own long term storage
+    # This si going to be done in a similar fashion to the update_instructions
+def flush_instructions(instructions: dict):
+    for key, value in instructions.items():
+        if isinstance(value, dict): flush_instructions(value)
+        store.put(
+            (LG_USER_ID,),
+            key,
+            {"prompt": value}
+        )
+
+# flush_instructions(prompt_instructions)
 
 email = { # Example incoming email
     "from": "Alice Smith <alice.smith@company.com>",
@@ -225,13 +278,13 @@ data2 = {
 import uuid
 
 store.put(
-    ("email_assistant", "lance", "examples"), 
+    ("email_assistant", LG_USER_ID, "examples"), 
     str(uuid.uuid4()), 
     data1
 )
 
 store.put(
-    ("email_assistant", "lance", "examples"), 
+    ("email_assistant", LG_USER_ID, "examples"), 
     str(uuid.uuid4()), 
     data2
 )
@@ -430,7 +483,7 @@ llm_router = llm.with_structured_output(Router, include_raw = True)
 manage_memory_tool = create_manage_memory_tool(
     namespace=(
         "email_assistant",
-        "{langgraph_user_id}",
+        LG_USER_ID,
         "collection"
     )
 )
@@ -438,7 +491,7 @@ manage_memory_tool = create_manage_memory_tool(
 search_memory_tool = create_search_memory_tool(
     namespace=(
         "email_assistant",
-        "{langgraph_user_id}",
+        LG_USER_ID,
         "collection"
     )
 )
@@ -982,10 +1035,9 @@ def router_node(state: AgentState) -> Command[
     email_thread = state['email_input']['email_thread']
 
     ## Setting up the namespace to retrieve few-shot exs
-    langgraph_user_id = config['configurable']['langgraph_user_id']
     namespace = (
         "email_assistant",
-        langgraph_user_id,
+        LG_USER_ID,
         "examples"
     )
 
@@ -999,7 +1051,7 @@ def router_node(state: AgentState) -> Command[
     examples=format_few_shot_examples(examples)
 
     ## Setting up namespace to retrieve prompt-instructions
-    namespace = (langgraph_user_id,)
+    namespace = (LG_USER_ID,)
 
     ## Retrieving specific prompts for router
     # Ignore prompt-specifics
@@ -1176,71 +1228,71 @@ optimizer = create_multi_prompt_optimizer(
 
 
 #### Creating the update-prompts for update-agent
-# prompts = [
-#     {
-#         "name": "main_agent",
-#         "prompt": store.get(("lance",), "agent_instructions").value['prompt'],
-#         "update_instructions": "keep the instructions short and to the point",
-#         "when_to_update": "Update this prompt whenever there is feedback on how the agent should write emails or schedule events"
+prompts = [
+    {
+        "name": "main_agent",
+        "prompt": store.get((LG_USER_ID,), "agent_instructions").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on how the agent should write emails or schedule events"
         
-#     },
-#     {
-#         "name": "triage-ignore", 
-#         "prompt": store.get(("lance",), "triage_ignore").value['prompt'],
-#         "update_instructions": "keep the instructions short and to the point",
-#         "when_to_update": "Update this prompt whenever there is feedback on which emails should be ignored"
+    },
+    {
+        "name": "triage-ignore", 
+        "prompt": store.get((LG_USER_ID,), "triage_ignore").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails should be ignored"
 
-#     },
-#     {
-#         "name": "triage-notify", 
-#         "prompt": store.get(("lance",), "triage_notify").value['prompt'],
-#         "update_instructions": "keep the instructions short and to the point",
-#         "when_to_update": "Update this prompt whenever there is feedback on which emails the user should be notified of"
+    },
+    {
+        "name": "triage-notify", 
+        "prompt": store.get((LG_USER_ID,), "triage_notify").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails the user should be notified of"
 
-#     },
-#     {
-#         "name": "triage-respond", 
-#         "prompt": store.get(("lance",), "triage_respond").value['prompt'],
-#         "update_instructions": "keep the instructions short and to the point",
-#         "when_to_update": "Update this prompt whenever there is feedback on which emails should be responded to"
+    },
+    {
+        "name": "triage-respond", 
+        "prompt": store.get((LG_USER_ID,), "triage_respond").value['prompt'],
+        "update_instructions": "keep the instructions short and to the point",
+        "when_to_update": "Update this prompt whenever there is feedback on which emails should be responded to"
 
-#     },
-# ]
+    },
+]
 
-# #### Updating prompts in long-term storage
-# def update_instructions(update_agent_response):
-#     for i, updated_prompt in enumerate(update_agent_response):
-#         old_prompt = prompts[i]
-#         if updated_prompt['prompt'] != old_prompt['prompt']:
-#             name = old_prompt['name']
-#             print(f"updated {name}")
-#             if name == "main_agent":
-#                 store.put(
-#                     ("lance",),
-#                     "agent_instructions",
-#                     {"prompt":updated_prompt['prompt']}
-#                 )
-#             if name == "triage-ignore":
-#                 store.put(
-#                     ("lance",),
-#                     "triage_ignore",
-#                     {"prompt":updated_prompt['prompt']}
-#                 )
-#             if name == "triage-notify":
-#                 store.put(
-#                     ("lance",),
-#                     "triage_notify",
-#                     {"prompt":updated_prompt['prompt']}
-#                 )
-#             if name == "triage-respond":
-#                 store.put(
-#                     ("lance",),
-#                     "triage_respond",
-#                     {"prompt":updated_prompt['prompt']}
-#                 )
-#             else:
-#                 #raise ValueError
-#                 print(f"Encountered {name}, implement the remaining stores!")
+#### Updating prompts in long-term storage
+def update_instructions(update_agent_response):
+    for i, updated_prompt in enumerate(update_agent_response):
+        old_prompt = prompts[i]
+        if updated_prompt['prompt'] != old_prompt['prompt']:
+            name = old_prompt['name']
+            print(f"updated {name}")
+            if name == "main_agent":
+                store.put(
+                    (LG_USER_ID,),
+                    "agent_instructions",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-ignore":
+                store.put(
+                    (LG_USER_ID,),
+                    "triage_ignore",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-notify":
+                store.put(
+                    (LG_USER_ID,),
+                    "triage_notify",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            if name == "triage-respond":
+                store.put(
+                    (LG_USER_ID,),
+                    "triage_respond",
+                    {"prompt":updated_prompt['prompt']}
+                )
+            else:
+                #raise ValueError
+                print(f"Encountered {name}, implement the remaining stores!")
 
 
 #### SImulating an update isntructions
