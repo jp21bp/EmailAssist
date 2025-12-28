@@ -1,5 +1,6 @@
 ###### Email Assistant
-
+#### Long term memory info
+# https://medium.com/@anil.jain.baba/long-term-agentic-memory-with-langgraph-824050b09852
 
 ##### General setup
 #### Import libraries
@@ -26,10 +27,12 @@ from datetime import datetime, timezone, timedelta
 from langmem import create_manage_memory_tool,\
     create_search_memory_tool, create_multi_prompt_optimizer
 ### Model libraries
-from langchain_google_genai import ChatGoogleGenerativeAI,GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI #,GoogleGenerativeAIEmbeddings
+from langchain_cohere import CohereEmbeddings
 ### Storage libraries
 from langgraph.store.memory import InMemoryStore
 from langgraph.store.postgres import PostgresStore
+from psycopg import Connection
 from langgraph.checkpoint.sqlite import SqliteSaver
 ### Prompt libraries
 from prompts import *
@@ -47,10 +50,11 @@ from googleapiclient.errors import HttpError
 from email.message import EmailMessage
 import base64
 
-#### Get APIs
+#### Get APIs and unpacking env variables
 load_dotenv()
 google_api_key = os.getenv("GOOGLE_API_KEY")
-
+cohere_api_key = os.getenv("COHERE_API_KEY")
+postgres_conn = os.getenv("POSTGRES_CONN")
 
 #### Setup models
 ### Base LLM
@@ -60,9 +64,9 @@ llm = ChatGoogleGenerativeAI(
 )
 
 ### Base embedding model
-embedding_model = GoogleGenerativeAIEmbeddings(
-    api_key=google_api_key,
-    model="models/gemini-embedding-001",
+embedding_model = CohereEmbeddings(
+    cohere_api_key=cohere_api_key,
+    model = "embed-english-light-v3.0",
 )
 
 #### Setting up DB storage utility
@@ -78,18 +82,17 @@ conn = sqlite3.connect('checkpoints.sqlite', check_same_thread=False)
 memory = SqliteSaver(conn)
 
 
-# ### Long-term memory
-# connection_string = "postgresql://jp:jp123@localhost:5432/lg_store"
-# conn2 = Connection.connect(connection_string, autocommit=True)
-#     #"postgresql://user:pass@localhost:5432/dbname"
-# store = PostgresStore(
-#     conn2,
-#     index={"embed": embedding_model, "dims": 3072}
-# )
-# store.setup()
+### Long-term memory
+## Postgres Store
+conn2 = Connection.connect(postgres_conn, autocommit=True)
+    #"postgresql://user:pass@localhost:5432/dbname"
+store = PostgresStore(
+    conn2,
+    index={"embed": embedding_model, "dims": 384}
+)
+store.setup()
     # This is needed in order to capture the tables schema needed in the database
 
-store = InMemoryStore()
 
 
 #### Setting up the configurations for the email agent
@@ -726,8 +729,7 @@ llm_router = llm.with_structured_output(Router, include_raw = True)
 ## Importing ambiguous prompt for main agent
 def react_sys_prompt():
     ## Setting up namespace to retrieve isntructions
-    langgraph_user_id = config["configurable"]['langgraph_user_id']
-    namespace = (langgraph_user_id,)
+    namespace = (LG_USER_ID,)
 
     # Actually retrieve the instructions
     result = store.get(namespace, "agent_instructions")
@@ -976,7 +978,7 @@ email_agent = email_agent.add_node("router", router_node)
 email_agent = email_agent.add_node("responder", responder_node)
 email_agent = email_agent.add_edge(START, "router")
 email_agent = email_agent.compile(
-    checkpointer=memory,
+    # checkpointer=memory,
     store=store
 )
 
